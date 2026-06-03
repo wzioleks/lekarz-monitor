@@ -1,0 +1,14 @@
+# Plik stanu monitora (tworzony lokalnie / w cache Actions)
+last_count.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Lokalna konfiguracja Claude Code
+.claude/
+
+# Lokalne pliki ze zmiennymi / sekretami (nigdy nie commitować)
+.env
+*.env
+zl_env.json

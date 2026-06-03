@@ -1,0 +1,55 @@
+name: ZnanyLekarz Monitor
+
+on:
+  schedule:
+    # Co 10 minut, całą dobę
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    # Możliwość ręcznego uruchomienia z GitHuba (przycisk "Run workflow")
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Zainstaluj zależności
+        run: pip install requests
+
+      # Przywróć zapisany stan (ile terminów było poprzednio)
+      - name: Przywróć stan
+        uses: actions/cache/restore@v4
+        with:
+          path: last_count.txt
+          key: slot-state-${{ github.run_id }}
+          restore-keys: |
+            slot-state-
+
+      # Sprawdź terminy i wyślij powiadomienie jeśli potrzeba
+      - name: Sprawdź terminy
+        env:
+          API_URL:            ${{ secrets.API_URL }}
+          DOCTOR_NAME:        ${{ secrets.DOCTOR_NAME }}
+          DOCTOR_PAGE_URL:    ${{ secrets.DOCTOR_PAGE_URL }}
+          COOKIE:             ${{ secrets.COOKIE }}
+          AUTHORIZATION:      ${{ secrets.AUTHORIZATION }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_slots.py
+
+      # Zapisz nowy stan na następne uruchomienie
+      - name: Zapisz stan
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: last_count.txt
+          key: slot-state-${{ github.run_id }}
