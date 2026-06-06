@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """
-ZnanyLekarz Monitor — wersja chmurowa (GitHub Actions)
+ZnanyLekarz Monitor — wersja chmurowa (GitHub Actions), z AUTO-LOGOWANIEM.
 Sprawdza wolne terminy u JEDNEGO lekarza i wysyła powiadomienie na telefon.
-Działa 24/7 w chmurze GitHub — komputer nie musi być włączony.
-Konfiguracja przez GitHub Secrets (patrz README.md).
+
+Zmiana vs poprzednia wersja: skrypt sam loguje się przy KAŻDYM uruchomieniu
+(email + hasło z Secrets ZL_EMAIL / ZL_PASSWORD), więc nie ma już problemu
+z wygasającym cookie/tokenem. URL do slotów jest budowany z twardych parametrów
+(doctor/address/service) — NIE z Secret API_URL.
 """
 
 import os
 import sys
 import requests
 from datetime import datetime, date, timezone
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+# ── Twarde parametry lekarza (NIE z Secrets) ────────────────────
+BASE          = "https://www.znanylekarz.pl"
+DOCTOR_ID     = 274464
+ADDRESS_ID    = 1042708
+SERVICE_ID    = 2868908
+
+# Endpoint slotów v3. Gdyby zwracał 404 — to JEDYNA linia do poprawienia
+# (struktura ścieżki bywa różna; parametry IDs są pewne).
+SLOTS_URL = (
+    f"{BASE}/api/v3/doctors/{DOCTOR_ID}/addresses/{ADDRESS_ID}/slots"
+)
 
 # ── Konfiguracja (z GitHub Secrets) ─────────────────────────────
-API_URL            = os.environ.get("API_URL", "").strip()
+ZL_EMAIL           = os.environ.get("ZL_EMAIL", "").strip()
+ZL_PASSWORD        = os.environ.get("ZL_PASSWORD", "").strip()
 DOCTOR_NAME        = os.environ.get("DOCTOR_NAME", "Lekarz").strip()
 DOCTOR_PAGE_URL    = os.environ.get("DOCTOR_PAGE_URL", "https://www.znanylekarz.pl/").strip()
-COOKIE             = os.environ.get("COOKIE", "").strip()
-# Pełna wartość nagłówka Authorization, np. "Bearer eyJ...". ZnanyLekarz v3 go wymaga.
-AUTHORIZATION      = os.environ.get("AUTHORIZATION", "").strip()
 NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -29,45 +41,74 @@ SEARCH_UNTIL = date(2026, 6, 30)
 # Plik stanu — pamięta poprzedni wynik między uruchomieniami (Actions Cache)
 STATE_FILE = "last_count.txt"
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pl-PL,pl;q=0.9",
+    "Referer": "https://www.znanylekarz.pl/",
+    "Origin": "https://www.znanylekarz.pl",
+}
 
-# ── Auto-odświeżanie dat w URL ──────────────────────────────────
 
-def refresh_date_params(url: str) -> str:
+# ── Logowanie ───────────────────────────────────────────────────
+
+def login(session: requests.Session) -> str:
     """
-    Jeśli URL zawiera parametry dat (start/end/since/until itp.),
-    ustawia je na 'od dziś do dziś+DAYS_AHEAD'. Dzięki temu skrypt
-    nie utknie na minionym tygodniu po kilku dniach działania.
+    Loguje się na ZnanyLekarz i zwraca pełną wartość nagłówka Authorization
+    (np. "Bearer eyJ...") lub "" jeśli logowanie tokenem się nie udało.
+    Ciasteczka sesji lądują w `session` i są używane niezależnie od tokenu.
+
+    Próbuje kilku znanych wariantów API v3 (Docplanner) — pierwszy, który
+    zwróci token, wygrywa. Logi wskażą, który zadziałał.
     """
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query, keep_blank_values=True)
-    today = date.today()
-    future = SEARCH_UNTIL
+    # 1. Rozgrzej sesję (cookies, ewentualny CSRF)
+    try:
+        session.get(BASE + "/", timeout=20)
+    except Exception as e:
+        print(f"  Logowanie: nie udalo sie pobrac strony glownej ({e})")
 
-    START_KEYS = {"start", "from", "since", "date", "start_date",
-                  "startdate", "date_from", "datefrom", "day"}
-    END_KEYS   = {"end", "to", "until", "end_date", "enddate",
-                  "date_to", "dateto"}
+    attempts = [
+        ("/api/v3/authentication_token", {"email": ZL_EMAIL, "password": ZL_PASSWORD}),
+        ("/api/v3/authentication_token", {"username": ZL_EMAIL, "password": ZL_PASSWORD}),
+        ("/api/v3/login",                {"email": ZL_EMAIL, "password": ZL_PASSWORD}),
+    ]
 
-    def fmt(new_date, old_value):
-        # Zachowaj sufiks czasu/strefy z oryginalnej wartości (np. T00:00:00+02:00).
-        # ZnanyLekarz v3 ODRZUCA samą datę (HTTP 404), wymaga pełnego ISO z offsetem.
-        s = str(old_value)
-        return new_date.isoformat() + s[s.index("T"):] if "T" in s else new_date.isoformat()
+    for path, payload in attempts:
+        try:
+            r = session.post(BASE + path, json=payload, headers=BROWSER_HEADERS, timeout=20)
+        except Exception as e:
+            print(f"  Logowanie {path}: blad polaczenia — {e}")
+            continue
 
-    changed = False
-    for key in list(params.keys()):
-        kl = key.lower()
-        old = params[key][0] if params[key] else ""
-        if kl in START_KEYS:
-            params[key] = [fmt(today, old)]
-            changed = True
-        elif kl in END_KEYS:
-            params[key] = [fmt(future, old)]
-            changed = True
+        if r.status_code in (200, 201):
+            try:
+                j = r.json()
+            except ValueError:
+                print(f"  Logowanie {path}: HTTP {r.status_code}, ale odpowiedz nie jest JSON")
+                continue
+            token = j.get("token") or j.get("access_token") or j.get("jwt")
+            if token:
+                print(f"  Logowanie OK ({path}) — token uzyskany.")
+                return f"Bearer {token}"
+            print(f"  Logowanie {path}: HTTP {r.status_code}, brak pola token w odpowiedzi "
+                  f"(klucze: {list(j.keys())[:8]})")
+        else:
+            print(f"  Logowanie {path}: HTTP {r.status_code}")
 
-    if changed:
-        return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
-    return url
+    # 2. Fallback: klasyczny formularz /login (uwierzytelnienie przez cookies sesji)
+    try:
+        r = session.post(BASE + "/login",
+                         data={"email": ZL_EMAIL, "password": ZL_PASSWORD},
+                         headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
+        if r.ok:
+            print("  Logowanie: formularz /login zwrocil OK — uzywam cookies sesji.")
+        else:
+            print(f"  Logowanie: formularz /login HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  Logowanie /login: blad — {e}")
+
+    return ""
 
 
 # ── Stan między uruchomieniami ──────────────────────────────────
@@ -201,45 +242,59 @@ def send_alert(slots: list, prev_count: int):
     notify_telegram(tg)
 
 
+# ── Budowa zapytania o sloty ────────────────────────────────────
+
+def build_params() -> dict:
+    """Parametry zapytania: okno dat od dziś do SEARCH_UNTIL w ISO+offset.
+    ZnanyLekarz v3 wymaga pełnego ISO z offsetem (sama data → HTTP 404)."""
+    offset = "+02:00"  # Polska czas letni (czerwiec)
+    return {
+        "service_id": SERVICE_ID,
+        "start": f"{date.today().isoformat()}T00:00:00{offset}",
+        "end":   f"{SEARCH_UNTIL.isoformat()}T23:59:59{offset}",
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
-    print(f"\n[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC] ZnanyLekarz Monitor")
+    print(f"\n[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC] ZnanyLekarz Monitor (auto-login)")
 
     # Walidacja
-    if not API_URL:
-        print("BLAD: Brak API_URL w GitHub Secrets — ustaw go i uruchom ponownie.")
+    if not (ZL_EMAIL and ZL_PASSWORD):
+        print("BLAD: Brak ZL_EMAIL / ZL_PASSWORD w GitHub Secrets — ustaw je i uruchom ponownie.")
         sys.exit(1)
     if not (NTFY_TOPIC or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
         print("Uwaga: Nie ustawiono zadnego kanalu powiadomien (NTFY_TOPIC lub TELEGRAM_*).")
 
-    # Odśwież daty w URL
-    url = refresh_date_params(API_URL)
+    # Logowanie
+    session = requests.Session()
+    authorization = login(session)
 
     # Stan
     last_count = read_last_count()
     print(f"  Poprzedni wynik: {last_count if last_count >= 0 else 'pierwsze uruchomienie'}")
 
-    # Zapytanie
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pl-PL,pl;q=0.9",
-        "Referer": "https://www.znanylekarz.pl/",
-    }
-    if COOKIE:
-        headers["Cookie"] = COOKIE
-    if AUTHORIZATION:
-        headers["Authorization"] = AUTHORIZATION
+    # Zapytanie o sloty
+    headers = dict(BROWSER_HEADERS)
+    if authorization:
+        headers["Authorization"] = authorization
+
+    params = build_params()
+    print(f"  GET {SLOTS_URL}")
+    print(f"      start={params['start']}  end={params['end']}  service_id={params['service_id']}")
 
     try:
-        resp = requests.get(url, headers=headers, timeout=25)
+        resp = session.get(SLOTS_URL, headers=headers, params=params, timeout=25)
         if resp.status_code == 401:
-            print("BLAD: HTTP 401 — endpoint wymaga logowania. Dodaj Secret COOKIE (patrz README).")
+            print("BLAD: HTTP 401 — logowanie nie dalo dostepu. Sprawdz ZL_EMAIL/ZL_PASSWORD "
+                  "albo endpoint logowania (patrz logi 'Logowanie' wyzej).")
             sys.exit(1)
         if resp.status_code == 403:
-            print("BLAD: HTTP 403 — odmowa dostepu. Sprawdz COOKIE / naglowki.")
+            print("BLAD: HTTP 403 — odmowa dostepu.")
+            sys.exit(1)
+        if resp.status_code == 404:
+            print("BLAD: HTTP 404 — zly adres endpointu slotow (SLOTS_URL). Popraw sciezke w check_slots.py.")
             sys.exit(1)
         resp.raise_for_status()
         all_slots = extract_slots(resp.json())
@@ -247,7 +302,7 @@ def main():
         count = len(slots)
         print(f"  W oknie dat: {len(all_slots)} slotow grafiku, z czego wolnych: {count}")
     except requests.exceptions.JSONDecodeError:
-        print("BLAD: Odpowiedz nie jest JSONem — sprawdz czy API_URL to wlasciwy endpoint (nie zwykla strona HTML).")
+        print("BLAD: Odpowiedz nie jest JSONem — prawdopodobnie zwrocono strone HTML (zle logowanie/adres).")
         sys.exit(1)
     except Exception as e:
         print(f"BLAD: Blad zapytania: {e}")
