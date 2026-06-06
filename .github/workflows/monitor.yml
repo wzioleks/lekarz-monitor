@@ -36,8 +36,6 @@ jobs:
       # Sprawdź terminy i wyślij powiadomienie jeśli potrzeba
       - name: Sprawdź terminy
         env:
-          ZL_EMAIL:           ${{ secrets.ZL_EMAIL }}
-          ZL_PASSWORD:        ${{ secrets.ZL_PASSWORD }}
           DOCTOR_NAME:        ${{ secrets.DOCTOR_NAME }}
           DOCTOR_PAGE_URL:    ${{ secrets.DOCTOR_PAGE_URL }}
           NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-ZnanyLekarz Monitor — wersja chmurowa (GitHub Actions), z AUTO-LOGOWANIEM.
+ZnanyLekarz Monitor — wersja chmurowa (GitHub Actions), SAMO-UWIERZYTELNIAJĄCA.
 Sprawdza wolne terminy u JEDNEGO lekarza i wysyła powiadomienie na telefon.
 
-Zmiana vs poprzednia wersja: skrypt sam loguje się przy KAŻDYM uruchomieniu
-(email + hasło z Secrets ZL_EMAIL / ZL_PASSWORD), więc nie ma już problemu
-z wygasającym cookie/tokenem. URL do slotów jest budowany z twardych parametrów
-(doctor/address/service) — NIE z Secret API_URL.
+Jak działa uwierzytelnianie (bez logowania email/hasłem!):
+ZnanyLekarz nie udostępnia logowania pacjenta przez API — zamiast tego strona
+lekarza zawiera w HTML świeżo wygenerowany ANONIMOWY token OAuth
+(ZLApp.APICredentials.ACCESS_TOKEN). Token jest tworzony przy KAŻDYM wczytaniu
+strony, więc skrypt pobiera nowy przy każdym uruchomieniu — problem wygasającego
+cookie/tokenu znika. URL do slotów budowany z twardych parametrów (doctor/address).
 """
 
 import os
+import re
 import sys
 import requests
 from datetime import datetime, date, timezone
@@ -20,6 +23,9 @@ DOCTOR_ID     = 274464
 ADDRESS_ID    = 1042708
 SERVICE_ID    = 2868908
 
+# Strona profilu lekarza — stąd pobieramy świeży anonimowy token OAuth.
+PROFILE_URL = f"{BASE}/mariana-karwan/dermatolog/koscierzyna"
+
 # Endpoint slotów v3. Gdyby zwracał 404 — to JEDYNA linia do poprawienia
 # (struktura ścieżki bywa różna; parametry IDs są pewne).
 SLOTS_URL = (
@@ -27,8 +33,6 @@ SLOTS_URL = (
 )
 
 # ── Konfiguracja (z GitHub Secrets) ─────────────────────────────
-ZL_EMAIL           = os.environ.get("ZL_EMAIL", "").strip()
-ZL_PASSWORD        = os.environ.get("ZL_PASSWORD", "").strip()
 DOCTOR_NAME        = os.environ.get("DOCTOR_NAME", "Lekarz").strip()
 DOCTOR_PAGE_URL    = os.environ.get("DOCTOR_PAGE_URL", "https://www.znanylekarz.pl/").strip()
 NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
@@ -51,64 +55,35 @@ BROWSER_HEADERS = {
 }
 
 
-# ── Logowanie ───────────────────────────────────────────────────
+# ── Uwierzytelnianie: świeży anonimowy token z profilu lekarza ──
 
-def login(session: requests.Session) -> str:
+# Token jest osadzony w HTML jako:  ZLApp.APICredentials = { 'ACCESS_TOKEN': '...', ... }
+TOKEN_RE = re.compile(r"ACCESS_TOKEN'\s*:\s*'([^']+)'")
+
+def get_access_token(session: requests.Session) -> str:
     """
-    Loguje się na ZnanyLekarz i zwraca pełną wartość nagłówka Authorization
-    (np. "Bearer eyJ...") lub "" jeśli logowanie tokenem się nie udało.
-    Ciasteczka sesji lądują w `session` i są używane niezależnie od tokenu.
-
-    Próbuje kilku znanych wariantów API v3 (Docplanner) — pierwszy, który
-    zwróci token, wygrywa. Logi wskażą, który zadziałał.
+    Pobiera stronę profilu lekarza i wyciąga z niej świeży anonimowy token OAuth.
+    Zwraca pełną wartość nagłówka Authorization ("Bearer ...") lub "" przy błędzie.
+    Ciasteczka z odpowiedzi zostają w `session` (czasem wymagane przez API).
     """
-    # 1. Rozgrzej sesję (cookies, ewentualny CSRF)
     try:
-        session.get(BASE + "/", timeout=20)
+        r = session.get(PROFILE_URL, headers=BROWSER_HEADERS, timeout=25)
     except Exception as e:
-        print(f"  Logowanie: nie udalo sie pobrac strony glownej ({e})")
+        print(f"  Token: blad pobierania strony profilu — {e}")
+        return ""
 
-    attempts = [
-        ("/api/v3/authentication_token", {"email": ZL_EMAIL, "password": ZL_PASSWORD}),
-        ("/api/v3/authentication_token", {"username": ZL_EMAIL, "password": ZL_PASSWORD}),
-        ("/api/v3/login",                {"email": ZL_EMAIL, "password": ZL_PASSWORD}),
-    ]
+    if r.status_code != 200:
+        print(f"  Token: strona profilu zwrocila HTTP {r.status_code} ({PROFILE_URL})")
+        return ""
 
-    for path, payload in attempts:
-        try:
-            r = session.post(BASE + path, json=payload, headers=BROWSER_HEADERS, timeout=20)
-        except Exception as e:
-            print(f"  Logowanie {path}: blad polaczenia — {e}")
-            continue
+    m = TOKEN_RE.search(r.text)
+    if not m:
+        print("  Token: nie znaleziono ACCESS_TOKEN w HTML profilu "
+              "(strona mogla zmienic strukture — sprawdz PROFILE_URL).")
+        return ""
 
-        if r.status_code in (200, 201):
-            try:
-                j = r.json()
-            except ValueError:
-                print(f"  Logowanie {path}: HTTP {r.status_code}, ale odpowiedz nie jest JSON")
-                continue
-            token = j.get("token") or j.get("access_token") or j.get("jwt")
-            if token:
-                print(f"  Logowanie OK ({path}) — token uzyskany.")
-                return f"Bearer {token}"
-            print(f"  Logowanie {path}: HTTP {r.status_code}, brak pola token w odpowiedzi "
-                  f"(klucze: {list(j.keys())[:8]})")
-        else:
-            print(f"  Logowanie {path}: HTTP {r.status_code}")
-
-    # 2. Fallback: klasyczny formularz /login (uwierzytelnienie przez cookies sesji)
-    try:
-        r = session.post(BASE + "/login",
-                         data={"email": ZL_EMAIL, "password": ZL_PASSWORD},
-                         headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
-        if r.ok:
-            print("  Logowanie: formularz /login zwrocil OK — uzywam cookies sesji.")
-        else:
-            print(f"  Logowanie: formularz /login HTTP {r.status_code}")
-    except Exception as e:
-        print(f"  Logowanie /login: blad — {e}")
-
-    return ""
+    print(f"  Token: pobrano swiezy anonimowy token (dlugosc {len(m.group(1))}).")
+    return f"Bearer {m.group(1)}"
 
 
 # ── Stan między uruchomieniami ──────────────────────────────────
@@ -258,18 +233,18 @@ def build_params() -> dict:
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
-    print(f"\n[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC] ZnanyLekarz Monitor (auto-login)")
+    print(f"\n[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC] ZnanyLekarz Monitor (anon-token)")
 
     # Walidacja
-    if not (ZL_EMAIL and ZL_PASSWORD):
-        print("BLAD: Brak ZL_EMAIL / ZL_PASSWORD w GitHub Secrets — ustaw je i uruchom ponownie.")
-        sys.exit(1)
     if not (NTFY_TOPIC or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
         print("Uwaga: Nie ustawiono zadnego kanalu powiadomien (NTFY_TOPIC lub TELEGRAM_*).")
 
-    # Logowanie
+    # Pobierz świeży anonimowy token z profilu lekarza
     session = requests.Session()
-    authorization = login(session)
+    authorization = get_access_token(session)
+    if not authorization:
+        print("BLAD: Nie udalo sie uzyskac tokenu z profilu lekarza — przerywam.")
+        sys.exit(1)
 
     # Stan
     last_count = read_last_count()
@@ -287,8 +262,8 @@ def main():
     try:
         resp = session.get(SLOTS_URL, headers=headers, params=params, timeout=25)
         if resp.status_code == 401:
-            print("BLAD: HTTP 401 — logowanie nie dalo dostepu. Sprawdz ZL_EMAIL/ZL_PASSWORD "
-                  "albo endpoint logowania (patrz logi 'Logowanie' wyzej).")
+            print("BLAD: HTTP 401 — token odrzucony. Token wygasl miedzy pobraniem strony "
+                  "a zapytaniem albo zmienil sie format (patrz logi 'Token' wyzej).")
             sys.exit(1)
         if resp.status_code == 403:
             print("BLAD: HTTP 403 — odmowa dostepu.")
