@@ -2,15 +2,24 @@ name: ZnanyLekarz Monitor
 
 on:
   schedule:
-    # Co 5 minut, całą dobę (5 min to minimalny interwał GitHub Actions)
+    # GitHub mocno throttluje schedule (realnie odpala co kilka godzin, NIE co 5 min).
+    # Dlatego schedule służy tu tylko do (re)startu długiej pętli poniżej — sam interwał
+    # 5 min realizuje pętla wewnątrz uruchomienia.
     - cron: '*/5 * * * *'
   workflow_dispatch:
-    # Możliwość ręcznego uruchomienia z GitHuba (przycisk "Run workflow")
+
+# Jeden aktywny monitor naraz. Nowy run nie zabija działającej pętli — czeka w kolejce
+# i startuje, gdy poprzednia (po ~5h40m) skończy → pokrycie jest ciągłe.
+concurrency:
+  group: zl-monitor
+  cancel-in-progress: false
 
 jobs:
   check-slots:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # ~6h to twardy limit jobu GitHuba; pętla kończy się sama wcześniej (340 min),
+    # więc nie wpadamy w timeout (timeout = fałszywy alert o awarii).
+    timeout-minutes: 350
 
     steps:
       - name: Pobierz kod
@@ -33,17 +42,29 @@ jobs:
           restore-keys: |
             slot-state-
 
-      # Sprawdź terminy i wyślij powiadomienie jeśli potrzeba
-      - name: Sprawdź terminy
+      # Pętla: sprawdzaj co 5 min przez ~5h40m. last_count.txt trzyma stan między
+      # iteracjami na dysku (bez round-tripu cache co 5 min).
+      - name: Monitoruj co 5 min
         env:
           DOCTOR_NAME:        ${{ secrets.DOCTOR_NAME }}
           DOCTOR_PAGE_URL:    ${{ secrets.DOCTOR_PAGE_URL }}
           NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python check_slots.py
+        run: |
+          DEADLINE=$(( $(date +%s) + 340*60 ))   # 5h40m
+          i=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            i=$((i+1))
+            echo "::group::Sprawdzenie #$i"
+            python check_slots.py || { echo "::endgroup::"; exit 1; }   # błąd → alert + restart
+            echo "::endgroup::"
+            # nie śpij po ostatniej iteracji tuż przed deadline
+            [ "$(( $(date +%s) + 300 ))" -lt "$DEADLINE" ] && sleep 300 || break
+          done
+          echo "Pętla zakończona po $i sprawdzeniach — kolejny run przejmie pałeczkę."
 
-      # Zapisz nowy stan na następne uruchomienie
+      # Zapisz stan na następny run (zapis po naturalnym końcu pętli)
       - name: Zapisz stan
         if: always()
         uses: actions/cache/save@v4
@@ -51,7 +72,7 @@ jobs:
           path: last_count.txt
           key: slot-state-${{ github.run_id }}
 
-      # Alert na telefon, gdy monitor padł (np. ZnanyLekarz zmienił API)
+      # Alert na telefon, gdy monitor padł (np. ZnanyLekarz zmienił API/strukturę strony)
       - name: Alert o awarii
         if: failure()
         run: |
