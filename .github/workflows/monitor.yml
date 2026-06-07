@@ -2,8 +2,8 @@ name: ZnanyLekarz Monitor
 
 on:
   schedule:
-    # Co 10 minut, całą dobę
-    - cron: '*/10 * * * *'
+    # Co 5 minut, całą dobę (5 min to minimalny interwał GitHub Actions)
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     # Możliwość ręcznego uruchomienia z GitHuba (przycisk "Run workflow")
 
@@ -50,3 +50,15 @@ jobs:
         with:
           path: last_count.txt
           key: slot-state-${{ github.run_id }}
+
+      # Alert na telefon, gdy monitor padł (np. ZnanyLekarz zmienił API)
+      - name: Alert o awarii
+        if: failure()
+        run: |
+          curl -s \
+            -H "Title: ZnanyLekarz Monitor — AWARIA" \
+            -H "Priority: urgent" \
+            -H "Tags: warning,skull" \
+            -H "Click: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "Monitor PADL — przestaje sprawdzac terminy. Kliknij, zeby zobaczyc logi." \
+            "https://ntfy.sh/${{ secrets.NTFY_TOPIC }}" || true
