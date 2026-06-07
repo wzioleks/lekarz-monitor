@@ -2,14 +2,13 @@ name: ZnanyLekarz Monitor
 
 on:
   schedule:
-    # GitHub mocno throttluje schedule (realnie odpala co kilka godzin, NIE co 5 min).
-    # Dlatego schedule służy tu tylko do (re)startu długiej pętli poniżej — sam interwał
-    # 5 min realizuje pętla wewnątrz uruchomienia.
-    - cron: '*/5 * * * *'
+    # Sieć bezpieczeństwa: gdyby łańcuch self-restartu się przerwał (run padł i nie
+    # odpalił następcy), schedule go wznowi. GitHub mocno throttluje schedule, więc
+    # to TYLKO recovery — ciągłość 24/7 robi self-restart poniżej.
+    - cron: '0 * * * *'
   workflow_dispatch:
 
-# Jeden aktywny monitor naraz. Nowy run nie zabija działającej pętli — czeka w kolejce
-# i startuje, gdy poprzednia (po ~5h40m) skończy → pokrycie jest ciągłe.
+# Jeden aktywny monitor naraz; następca czeka w kolejce i startuje po końcu bieżącego.
 concurrency:
   group: zl-monitor
   cancel-in-progress: false
@@ -17,8 +16,8 @@ concurrency:
 jobs:
   check-slots:
     runs-on: ubuntu-latest
-    # ~6h to twardy limit jobu GitHuba; pętla kończy się sama wcześniej (340 min),
-    # więc nie wpadamy w timeout (timeout = fałszywy alert o awarii).
+    # ~6h to twardy limit jobu; pętla kończy się sama na 340 min, więc nie wpadamy
+    # w timeout (timeout = fałszywy alert o awarii).
     timeout-minutes: 350
 
     steps:
@@ -33,7 +32,6 @@ jobs:
       - name: Zainstaluj zależności
         run: pip install requests
 
-      # Przywróć zapisany stan (ile terminów było poprzednio)
       - name: Przywróć stan
         uses: actions/cache/restore@v4
         with:
@@ -42,8 +40,9 @@ jobs:
           restore-keys: |
             slot-state-
 
-      # Pętla: sprawdzaj co 5 min przez ~5h40m. last_count.txt trzyma stan między
-      # iteracjami na dysku (bez round-tripu cache co 5 min).
+      # Pętla: sprawdzaj co 5 min przez ~5h40m. Pojedynczy błąd (np. chwilowy blip
+      # ZnanyLekarz/sieci) jest tolerowany — dopiero 3 błędy POD RZĄD kończą run
+      # i odpalają alert. Dzięki temu nie ma fałszywych alarmów ani spamu.
       - name: Monitoruj co 5 min
         env:
           DOCTOR_NAME:        ${{ secrets.DOCTOR_NAME }}
@@ -53,18 +52,27 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           DEADLINE=$(( $(date +%s) + 340*60 ))   # 5h40m
-          i=0
+          i=0; fails=0
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             i=$((i+1))
-            echo "::group::Sprawdzenie #$i"
-            python check_slots.py || { echo "::endgroup::"; exit 1; }   # błąd → alert + restart
+            echo "::group::Sprawdzenie #$i ($(date -u +%H:%M:%S) UTC)"
+            if python check_slots.py; then
+              fails=0
+            else
+              fails=$((fails+1))
+              echo "!! Sprawdzenie #$i nieudane ($fails z rzedu)"
+              if [ "$fails" -ge 3 ]; then
+                echo "::endgroup::"
+                echo "3 bledy pod rzad — koncze run i alarmuje."
+                exit 1
+              fi
+            fi
             echo "::endgroup::"
             # nie śpij po ostatniej iteracji tuż przed deadline
             [ "$(( $(date +%s) + 300 ))" -lt "$DEADLINE" ] && sleep 300 || break
           done
-          echo "Pętla zakończona po $i sprawdzeniach — kolejny run przejmie pałeczkę."
+          echo "Petla OK po $i sprawdzeniach — odpalam nastepcę."
 
-      # Zapisz stan na następny run (zapis po naturalnym końcu pętli)
       - name: Zapisz stan
         if: always()
         uses: actions/cache/save@v4
@@ -72,7 +80,18 @@ jobs:
           path: last_count.txt
           key: slot-state-${{ github.run_id }}
 
-      # Alert na telefon, gdy monitor padł (np. ZnanyLekarz zmienił API/strukturę strony)
+      # SELF-RESTART: po czystym zakończeniu pętli odpal następny run (PAT, bo
+      # wbudowany token nie może wyzwalać workflowów). To daje ciągłe 24/7 niezależnie
+      # od throttlingu schedule. Przy awarii (run failed) ten krok jest pomijany —
+      # wtedy wznawia schedule, żeby nie robić ciasnej pętli crashy.
+      - name: Odpal następny run (ciągłość 24/7)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.ZL_PAT }}
+        run: |
+          echo "Odpalam kolejny run lancucha..."
+          gh workflow run monitor.yml -R "${{ github.repository }}" --ref main
+
       - name: Alert o awarii
         if: failure()
         run: |
