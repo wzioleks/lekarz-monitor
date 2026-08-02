@@ -36,9 +36,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: last_count.txt
-          key: slot-state-v3-${{ github.run_id }}
+          key: slot-state-v4-${{ github.run_id }}
           restore-keys: |
-            slot-state-v3-
+            slot-state-v4-
 
       # Pętla: sprawdzaj co 5 min przez ~5h40m. Pojedynczy błąd (np. chwilowy blip
       # ZnanyLekarz/sieci) jest tolerowany — dopiero 3 błędy POD RZĄD kończą run
@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: last_count.txt
-          key: slot-state-v3-${{ github.run_id }}
+          key: slot-state-v4-${{ github.run_id }}
 
       # SELF-RESTART: po czystym zakończeniu pętli odpal następny run (PAT, bo
       # wbudowany token nie może wyzwalać workflowów). To daje ciągłe 24/7 niezależnie
