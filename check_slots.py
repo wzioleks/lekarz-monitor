@@ -39,10 +39,10 @@ NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# Okno poszukiwań.
-# SEARCH_FROM = None  → szukaj OD DZIŚ (tryb testowy: widać, że powiadomienia działają).
-# Docelowo (2 tygodnie od 18.08 włącznie) wystarczy wpisać: date(2026, 8, 18)
-SEARCH_FROM  = None
+# Okno poszukiwań: 2 tygodnie od 18.08.2026 włącznie (18.08 – 31.08).
+# SEARCH_FROM = None → tryb testowy: szukaj od dziś (przydatne do sprawdzenia,
+# czy powiadomienia w ogóle dochodzą, gdy w docelowym oknie jest pusto).
+SEARCH_FROM  = date(2026, 8, 18)
 SEARCH_UNTIL = date(2026, 8, 31)
 
 # Plik stanu — pamięta poprzedni wynik między uruchomieniami (Actions Cache)
