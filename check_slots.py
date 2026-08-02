@@ -39,8 +39,9 @@ NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# Szukaj terminów tylko do końca czerwca
-SEARCH_UNTIL = date(2026, 6, 30)
+# Okno poszukiwań: 2 tygodnie od 18.08.2026 włącznie (18.08 – 31.08).
+SEARCH_FROM  = date(2026, 8, 18)
+SEARCH_UNTIL = date(2026, 8, 31)
 
 # Plik stanu — pamięta poprzedni wynik między uruchomieniami (Actions Cache)
 STATE_FILE = "last_count.txt"
@@ -220,12 +221,14 @@ def send_alert(slots: list, prev_count: int):
 # ── Budowa zapytania o sloty ────────────────────────────────────
 
 def build_params() -> dict:
-    """Parametry zapytania: okno dat od dziś do SEARCH_UNTIL w ISO+offset.
-    ZnanyLekarz v3 wymaga pełnego ISO z offsetem (sama data → HTTP 404)."""
-    offset = "+02:00"  # Polska czas letni (czerwiec)
+    """Parametry zapytania: okno SEARCH_FROM..SEARCH_UNTIL w ISO+offset.
+    ZnanyLekarz v3 wymaga pełnego ISO z offsetem (sama data → HTTP 404).
+    Gdy SEARCH_FROM już minął, start = dziś (nie pytamy o przeszłość)."""
+    offset = "+02:00"  # Polska czas letni (CEST, obowiązuje w sierpniu)
+    start = max(SEARCH_FROM, date.today())
     return {
         "service_id": SERVICE_ID,
-        "start": f"{date.today().isoformat()}T00:00:00{offset}",
+        "start": f"{start.isoformat()}T00:00:00{offset}",
         "end":   f"{SEARCH_UNTIL.isoformat()}T23:59:59{offset}",
     }
 

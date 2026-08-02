@@ -5,8 +5,8 @@ Automatycznie pinguje wolne terminy u wybranego lekarza na
 gdy tylko pojawi się nowy termin. Działa 24/7 w chmurze GitHub Actions —
 komputer nie musi być włączony.
 
-Domyślnie monitoruje: **Mariana Karwan — dermatolog (Kościerzyna)**, terminy do
-końca czerwca 2026. Sprawdzanie co 5 minut.
+Domyślnie monitoruje: **Mariana Karwan — dermatolog (Kościerzyna)**, terminy
+w oknie **18–31.08.2026**. Sprawdzanie co 5 minut.
 
 ## Jak to działa
 
@@ -57,7 +57,8 @@ DOCTOR_ID   = 274464
 ADDRESS_ID  = 1042708
 SERVICE_ID  = 2868908
 PROFILE_URL = "https://www.znanylekarz.pl/.../..."   # strona profilu lekarza
-SEARCH_UNTIL = date(2026, 6, 30)                      # do kiedy szukać
+SEARCH_FROM  = date(2026, 8, 18)                      # od kiedy szukać
+SEARCH_UNTIL = date(2026, 8, 31)                      # do kiedy szukać
 ```
 
 IDs i `PROFILE_URL` znajdziesz w DevTools (F12 → Network → Fetch/XHR) na stronie
