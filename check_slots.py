@@ -39,8 +39,10 @@ NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# Okno poszukiwań: 2 tygodnie od 18.08.2026 włącznie (18.08 – 31.08).
-SEARCH_FROM  = date(2026, 8, 18)
+# Okno poszukiwań.
+# SEARCH_FROM = None  → szukaj OD DZIŚ (tryb testowy: widać, że powiadomienia działają).
+# Docelowo (2 tygodnie od 18.08 włącznie) wystarczy wpisać: date(2026, 8, 18)
+SEARCH_FROM  = None
 SEARCH_UNTIL = date(2026, 8, 31)
 
 # Plik stanu — pamięta poprzedni wynik między uruchomieniami (Actions Cache)
@@ -223,9 +225,10 @@ def send_alert(slots: list, prev_count: int):
 def build_params() -> dict:
     """Parametry zapytania: okno SEARCH_FROM..SEARCH_UNTIL w ISO+offset.
     ZnanyLekarz v3 wymaga pełnego ISO z offsetem (sama data → HTTP 404).
-    Gdy SEARCH_FROM już minął, start = dziś (nie pytamy o przeszłość)."""
+    SEARCH_FROM=None → start dziś; gdy SEARCH_FROM już minął, też dziś
+    (nie pytamy o przeszłość)."""
     offset = "+02:00"  # Polska czas letni (CEST, obowiązuje w sierpniu)
-    start = max(SEARCH_FROM, date.today())
+    start = max(SEARCH_FROM, date.today()) if SEARCH_FROM else date.today()
     return {
         "service_id": SERVICE_ID,
         "start": f"{start.isoformat()}T00:00:00{offset}",
