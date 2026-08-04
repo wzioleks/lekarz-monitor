@@ -1,7 +1,5 @@
 # ZnanyLekarz Slot Monitor
 
-![monitor](https://github.com/wzioleks/lekarz-monitor/actions/workflows/monitor.yml/badge.svg)
-
 Watches a doctor's calendar on [znanylekarz.pl](https://www.znanylekarz.pl) and pushes a
 notification to your phone the moment a new appointment slot opens up in a date range you
 care about. Runs entirely on GitHub Actions — no server, no always-on machine.
