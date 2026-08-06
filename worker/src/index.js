@@ -87,6 +87,22 @@ async function fetchSlots(env, now = new Date()) {
   return { free, window: { start, end: env.SEARCH_UNTIL }, url };
 }
 
+/** Nagłówki HTTP przenoszą tylko ASCII. Polskie znaki i myślniki trzeba zakodować
+ *  wg RFC 2047, inaczej ntfy odrzuca żądanie albo tytuł przychodzi zniekształcony. */
+function headerSafe(s) {
+  if (/^[\x20-\x7E]*$/.test(s)) return s;
+  const bytes = new TextEncoder().encode(s);
+  const b64 = btoa(String.fromCharCode(...bytes));
+  return `=?UTF-8?B?${b64}?=`;
+}
+
+/** Nagłówek autoryzacji ntfy. Bez niego limity liczone są PER IP — a Workers
+ *  wychodzą ze współdzielonych IP Cloudflare, więc cudzy ruch wyczerpuje nasz limit
+ *  (HTTP 429). Z tokenem konta limit jest nasz własny. */
+function ntfyAuth(env) {
+  return env.NTFY_TOKEN ? { Authorization: `Bearer ${env.NTFY_TOKEN}` } : {};
+}
+
 async function notify(env, slots) {
   if (!env.NTFY_TOPIC) return "brak NTFY_TOPIC";
   const nearest = slots[0]?.start ?? "";
@@ -101,13 +117,16 @@ async function notify(env, slots) {
     method: "POST",
     body,
     headers: {
-      Title: `${env.DOCTOR_NAME || "Lekarz"} — WOLNY TERMIN!`,
+      ...ntfyAuth(env),
+      Title: headerSafe(`${env.DOCTOR_NAME || "Lekarz"} - WOLNY TERMIN!`),
       Priority: "urgent",
       Tags: "hospital,bell,rotating_light",
       Click: click,
     },
   });
-  return r.ok ? "OK" : `blad HTTP ${r.status}`;
+  const detail = r.ok ? "" : ` — ${(await r.text()).slice(0, 200)}`;
+  console.log(`ntfy: HTTP ${r.status}${detail}`);
+  return `HTTP ${r.status}${detail}`;
 }
 
 /** Alert, gdy monitor sam się wykłada (np. ZnanyLekarz zmienił stronę). */
@@ -117,7 +136,8 @@ async function notifyFailure(env, message) {
     method: "POST",
     body: `Monitor nie moze sprawdzic terminow: ${message}`,
     headers: {
-      Title: "ZnanyLekarz Monitor — AWARIA",
+      ...ntfyAuth(env),
+      Title: headerSafe("ZnanyLekarz Monitor - AWARIA"),
       Priority: "urgent",
       Tags: "warning,skull",
     },
@@ -164,7 +184,23 @@ export default {
   },
 
   async fetch(request, env) {
-    const notifyFlag = new URL(request.url).searchParams.get("notify") === "1";
+    const params = new URL(request.url).searchParams;
+
+    // ?test=1 → wyślij powiadomienie testowe i pokaż DOKŁADNĄ odpowiedź ntfy.
+    // Osiągalne tylko przez `wrangler dev` (Worker nie ma publicznego URL-a).
+    if (params.get("test") === "1") {
+      const result = await notify(env, [
+        { start: "2026-01-01T12:00:00+01:00", booking_url: env.PROFILE_URL },
+      ]);
+      return Response.json({
+        test: true,
+        ntfy: result,
+        topicUstawiony: Boolean(env.NTFY_TOPIC),
+        topicDlugosc: env.NTFY_TOPIC ? env.NTFY_TOPIC.length : 0,
+      });
+    }
+
+    const notifyFlag = params.get("notify") === "1";
     try {
       const result = await runCheck(env, { allowNotify: notifyFlag });
       return Response.json(result);
