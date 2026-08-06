@@ -12,3 +12,7 @@ __pycache__/
 .env
 *.env
 zl_env.json
+
+# Cloudflare Worker
+node_modules/
+.wrangler/

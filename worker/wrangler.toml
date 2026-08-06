@@ -1,0 +1,30 @@
+name = "lekarz-monitor"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# Bez publicznego URL-a — Worker odpala wyłącznie cron. Dzięki temu nikt z zewnątrz
+# nie może go wywołać (endpoint fetch() zostaje do testów przez `wrangler dev`).
+workers_dev = false
+
+# Sprawdzaj co 5 minut. Cloudflare wykonuje to niezawodnie — bez throttlingu,
+# bez limitu czasu joba, bez łańcucha uruchomień.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Konfiguracja lekarza i okna dat (nie sekrety — mogą być w repo).
+[vars]
+DOCTOR_ID    = "274464"
+ADDRESS_ID   = "1042708"
+SERVICE_ID   = "2868908"
+PROFILE_URL  = "https://www.znanylekarz.pl/mariana-karwan/dermatolog/koscierzyna"
+DOCTOR_NAME  = "Mariana Karwan — dermatolog"
+SEARCH_FROM  = "2026-08-21"
+SEARCH_UNTIL = "2026-08-31"
+
+# Stan między uruchomieniami (poprzednia liczba terminów).
+# ID uzupełnia się po: npx wrangler kv namespace create STATE
+[[kv_namespaces]]
+binding = "STATE"
+id = "4d5e492639e1487fbaf68ac40a87aed0"
+
+# NTFY_TOPIC trzymamy jako sekret:  npx wrangler secret put NTFY_TOPIC
