@@ -208,6 +208,9 @@ async function heartbeat(env) {
     body,
     priority: stale ? "high" : "default",
     tags: stale ? "warning" : "heavy_check_mark",
+    // Codzienny puls przychodzi bez dźwięku i wibracji — ma nie budzić rano.
+    // Wariant "coś nie gra" celowo jest głośny.
+    silent: !stale,
   });
 }
 
