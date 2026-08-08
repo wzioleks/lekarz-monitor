@@ -103,8 +103,63 @@ function ntfyAuth(env) {
   return env.NTFY_TOKEN ? { Authorization: `Bearer ${env.NTFY_TOKEN}` } : {};
 }
 
+/**
+ * Wysyłka przez Telegram. Główny kanał powiadomień: limity są per bot (ogromne),
+ * a nie per IP — w przeciwieństwie do darmowego ntfy.sh, które przy wysyłce
+ * ze współdzielonych IP Cloudflare losowo zwraca HTTP 429.
+ *
+ * `silent: true` → wiadomość bez dźwięku i wibracji.
+ */
+async function sendTelegram(env, { title, body, click, silent = false }) {
+  if (!(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID)) return null;
+
+  const text =
+    `<b>${title}</b>\n${body}` + (click ? `\n\n<a href="${click}">Otworz »</a>` : "");
+
+  const r = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: env.TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "HTML",
+        disable_notification: silent,
+      }),
+    }
+  );
+  const detail = r.ok ? "" : ` — ${(await r.text()).slice(0, 200)}`;
+  return `TG HTTP ${r.status}${detail}`;
+}
+
+/** Wysyłka przez ntfy (kanał zapasowy — patrz uwaga o limitach per IP). */
+async function sendNtfy(env, { title, body, click, priority, tags }) {
+  if (!env.NTFY_TOPIC) return null;
+  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
+    method: "POST",
+    body,
+    headers: {
+      ...ntfyAuth(env),
+      Title: headerSafe(title),
+      Priority: priority,
+      Tags: tags,
+      ...(click ? { Click: click } : {}),
+    },
+  });
+  const detail = r.ok ? "" : ` — ${(await r.text()).slice(0, 200)}`;
+  return `ntfy HTTP ${r.status}${detail}`;
+}
+
+/** Wyślij wszystkimi skonfigurowanymi kanałami; zwróć zbiorczy status. */
+async function push(env, msg) {
+  const results = await Promise.all([sendTelegram(env, msg), sendNtfy(env, msg)]);
+  const summary = results.filter(Boolean).join(" | ") || "brak skonfigurowanego kanalu";
+  console.log(`push: ${summary}`);
+  return summary;
+}
+
 async function notify(env, slots) {
-  if (!env.NTFY_TOPIC) return "brak NTFY_TOPIC";
   const nearest = slots[0]?.start ?? "";
   const pretty = nearest ? nearest.replace("T", " ").slice(0, 16) : "";
   const click = slots[0]?.booking_url || env.PROFILE_URL;
@@ -113,20 +168,13 @@ async function notify(env, slots) {
     `Dostepnych terminow: ${slots.length}` +
     (pretty ? ` | Najblizszy: ${pretty}` : "");
 
-  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
-    method: "POST",
+  return push(env, {
+    title: `${env.DOCTOR_NAME || "Lekarz"} - WOLNY TERMIN!`,
     body,
-    headers: {
-      ...ntfyAuth(env),
-      Title: headerSafe(`${env.DOCTOR_NAME || "Lekarz"} - WOLNY TERMIN!`),
-      Priority: "urgent",
-      Tags: "hospital,bell,rotating_light",
-      Click: click,
-    },
+    click,
+    priority: "urgent",
+    tags: "hospital,bell,rotating_light",
   });
-  const detail = r.ok ? "" : ` — ${(await r.text()).slice(0, 200)}`;
-  console.log(`ntfy: HTTP ${r.status}${detail}`);
-  return `HTTP ${r.status}${detail}`;
 }
 
 /** Cron pulsu — musi być identyczny jak wpis w wrangler.toml. */
@@ -141,8 +189,6 @@ const HEARTBEAT_CRON = "0 6 * * *";
  * (długa seria) używany przy prawdziwych terminach.
  */
 async function heartbeat(env) {
-  if (!env.NTFY_TOPIC) return;
-
   const lastRun = await env.STATE.get("last_run");
   const lastCount = await env.STATE.get("last_count");
   const ageMin = lastRun
@@ -157,30 +203,21 @@ async function heartbeat(env) {
     ? `Sprawdzenia nie dzialaja. Ostatnie: ${ageMin === null ? "nigdy" : ageMin + " min temu"}`
     : `Wolnych terminow w oknie: ${lastCount ?? "?"}\nOstatnie sprawdzenie: ${ageMin} min temu`;
 
-  await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
-    method: "POST",
+  return push(env, {
+    title: stale ? "Monitor - COS NIE GRA" : "Monitor dziala",
     body,
-    headers: {
-      ...ntfyAuth(env),
-      Title: headerSafe(stale ? "Monitor - COS NIE GRA" : "Monitor dziala"),
-      Priority: stale ? "high" : "default",
-      Tags: stale ? "warning" : "heavy_check_mark",
-    },
+    priority: stale ? "high" : "default",
+    tags: stale ? "warning" : "heavy_check_mark",
   });
 }
 
 /** Alert, gdy monitor sam się wykłada (np. ZnanyLekarz zmienił stronę). */
 async function notifyFailure(env, message) {
-  if (!env.NTFY_TOPIC) return;
-  await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
-    method: "POST",
+  await push(env, {
+    title: "ZnanyLekarz Monitor - AWARIA",
     body: `Monitor nie moze sprawdzic terminow: ${message}`,
-    headers: {
-      ...ntfyAuth(env),
-      Title: headerSafe("ZnanyLekarz Monitor - AWARIA"),
-      Priority: "urgent",
-      Tags: "warning,skull",
-    },
+    priority: "urgent",
+    tags: "warning,skull",
   }).catch(() => {});
 }
 
@@ -244,10 +281,31 @@ export default {
       });
     }
 
+    // ?chatid=1 → odczytaj chat_id z ostatnich wiadomości wysłanych do bota.
+    // Dzięki temu token bota zostaje w sekretach i nigdzie go nie trzeba wklejać.
+    if (params.get("chatid") === "1") {
+      if (!env.TELEGRAM_BOT_TOKEN) {
+        return Response.json({ blad: "brak sekretu TELEGRAM_BOT_TOKEN" }, { status: 400 });
+      }
+      const r = await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getUpdates`
+      );
+      const j = await r.json();
+      const czaty = (j.result || [])
+        .map((u) => u.message?.chat)
+        .filter(Boolean)
+        .map((c) => ({ chat_id: c.id, kto: c.username || c.first_name || c.type }));
+      return Response.json({
+        znalezione: czaty,
+        podpowiedz: czaty.length
+          ? "Ustaw chat_id jako sekret TELEGRAM_CHAT_ID"
+          : "Napisz cokolwiek do swojego bota na Telegramie i sprobuj ponownie",
+      });
+    }
+
     // ?heartbeat=1 → wyślij puls od razu, bez czekania na poranny cron.
     if (params.get("heartbeat") === "1") {
-      await heartbeat(env);
-      return Response.json({ heartbeat: "wyslany" });
+      return Response.json({ heartbeat: await heartbeat(env) });
     }
 
     const notifyFlag = params.get("notify") === "1";
