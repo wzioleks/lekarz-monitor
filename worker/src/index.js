@@ -272,16 +272,20 @@ export default {
 
     // ?test=1 → wyślij powiadomienie testowe i pokaż DOKŁADNĄ odpowiedź ntfy.
     // Osiągalne tylko przez `wrangler dev` (Worker nie ma publicznego URL-a).
-    if (params.get("test") === "1") {
-      const result = await notify(env, [
-        { start: "2026-01-01T12:00:00+01:00", booking_url: env.PROFILE_URL },
-      ]);
-      return Response.json({
-        test: true,
-        ntfy: result,
-        topicUstawiony: Boolean(env.NTFY_TOPIC),
-        topicDlugosc: env.NTFY_TOPIC ? env.NTFY_TOPIC.length : 0,
-      });
+    const testMode = params.get("test");
+    if (testMode) {
+      const msg = {
+        title: `${env.DOCTOR_NAME || "Lekarz"} - WOLNY TERMIN!`,
+        body: "Test powiadomienia",
+        click: env.PROFILE_URL,
+        priority: "urgent",
+        tags: "hospital,bell,rotating_light",
+      };
+      // ?test=tg → tylko Telegram (do porównywania wibracji bez dubla z ntfy)
+      if (testMode === "tg") {
+        return Response.json({ test: "telegram", wynik: await sendTelegram(env, msg) });
+      }
+      return Response.json({ test: "wszystkie kanaly", wynik: await push(env, msg) });
     }
 
     // ?chatid=1 → odczytaj chat_id z ostatnich wiadomości wysłanych do bota.

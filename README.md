@@ -15,27 +15,43 @@ turns "next opening is in 7 weeks" into "somebody just cancelled for next Tuesda
    API. No account, no credentials, no cookies to keep alive.
 3. Free slots inside the configured window are counted and compared against the previous
    run (stored in Workers KV).
-4. If the count went **up**, a push notification is sent via [ntfy](https://ntfy.sh).
-   Otherwise it stays silent — no repeat alerts for slots you already know about.
-5. If a run throws (e.g. the page structure changed and the token can't be extracted), a
-   separate urgent alert is sent instead, so failures aren't silent.
+4. If the count went **up**, a push notification goes out. Otherwise it stays silent — no
+   repeat alerts for slots you already know about.
+5. If a run throws (e.g. the page structure changed and the token can't be extracted), an
+   urgent alert is sent instead, so breakage isn't silent.
 
-The whole thing is one file: [`worker/src/index.js`](worker/src/index.js).
+Everything lives in one file: [`worker/src/index.js`](worker/src/index.js).
 
-> **Historical note.** This started on GitHub Actions. Actions is built for
-> "run something after a commit", not for continuous polling, and it showed: `schedule` is
-> throttled to roughly hourly in practice, jobs are capped at 6 hours (so runs had to chain
-> themselves), chaining needs a PAT that expires, private repos meter minutes (a 24/7 loop
-> burns any plan's quota in ~2 days), and when a job failed to get a runner the in-job
-> failure alert could never fire — so it died silently. A cron-triggered Worker removes all
-> of those failure modes rather than working around them. The old workflow is kept in
+### Notification channels
+
+Messages go out over **Telegram** (primary) and **ntfy** (secondary) in parallel — whichever
+is configured. Both are optional individually, but you want at least one.
+
+> **Use Telegram as the primary channel.** ntfy.sh rate-limits publishing **per source IP**,
+> and Workers egress from shared Cloudflare addresses, so you inherit strangers' traffic
+> against the same quota. In practice that means intermittent `HTTP 429` with no message
+> delivered — it works, then randomly doesn't, with no signal that anything was dropped. An
+> ntfy account token does *not* fix this on the free tier; the limit stays tied to the IP.
+> Telegram's limits are per bot, so the problem disappears.
+
+### Daily heartbeat
+
+A second cron sends one **silent** message a day ("still alive, N slots in window"). It costs
+nothing and closes the worst failure mode: if the Worker or the notification channel dies,
+silence looks exactly like "no slots available". With a heartbeat, **the absence of the
+message is itself the signal** — you don't have to remember to check anything.
+
+If the heartbeat fires but the last successful check is stale, it switches to a loud
+"something's wrong" variant instead.
+
+> **Historical note.** This started on GitHub Actions. Actions is built for "run something
+> after a commit", not continuous polling, and it showed: `schedule` is throttled to roughly
+> hourly in practice, jobs are capped at 6 hours (so runs had to chain themselves), chaining
+> needs a PAT that expires, private repos meter minutes (a 24/7 loop burns any plan's quota
+> in ~2 days), and when a job failed to get a runner the in-job failure alert could never
+> fire — so it died silently for hours. A cron-triggered Worker removes those failure modes
+> rather than working around them. The old workflow is kept in
 > [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml) for reference, disabled.
-
-## Requirements
-
-- A free [Cloudflare](https://dash.cloudflare.com/sign-up) account (Workers free plan is
-  ample: 100k requests/day, we use ~288)
-- A free [ntfy.sh](https://ntfy.sh) account and the ntfy app on your phone
 
 ## Setup
 
@@ -59,7 +75,7 @@ DOCTOR_ID    = "274464"
 ADDRESS_ID   = "1042708"
 SERVICE_ID   = "2868908"
 PROFILE_URL  = "https://www.znanylekarz.pl/<slug>/<specialty>/<city>"
-SEARCH_FROM  = "2026-08-21"   # or omit/blank to search from today
+SEARCH_FROM  = "2026-08-21"   # leave blank to search from today
 SEARCH_UNTIL = "2026-08-31"
 ```
 
@@ -67,37 +83,65 @@ To find the IDs: open the doctor's page, press <kbd>F12</kbd> → **Network** �
 **Fetch/XHR**, click through the calendar, and read the request to
 `/api/v3/doctors/<DOCTOR_ID>/addresses/<ADDRESS_ID>/slots`.
 
-**3. Set the notification secrets:**
+**3. Create a Telegram bot:** message [@BotFather](https://t.me/BotFather), send `/newbot`,
+follow the prompts, and copy the token. Then open a chat with your new bot and send it any
+message — a bot cannot message you first until you've written to it.
 
 ```bash
-npx wrangler secret put NTFY_TOPIC   # your random ntfy topic
-npx wrangler secret put NTFY_TOKEN   # ntfy access token — set it to never expire
+npx wrangler secret put TELEGRAM_BOT_TOKEN
 ```
 
-> `NTFY_TOKEN` is not optional in practice. ntfy.sh rate-limits publishing **per IP**, and
-> Workers egress from shared Cloudflare addresses — without an account token you inherit
-> a stranger's exhausted quota and get `HTTP 429` with no notification. An account token
-> moves the limit onto your own account.
+Find your chat id by running the Worker locally (see *Testing*) and hitting `/?chatid=1`,
+then:
 
-**4. Deploy:**
+```bash
+npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+**4. Optional — ntfy as a secondary channel.** Subscribe to a random, hard-to-guess topic in
+the [ntfy](https://ntfy.sh) app, then:
+
+```bash
+npx wrangler secret put NTFY_TOPIC
+npx wrangler secret put NTFY_TOKEN   # optional; see the rate-limit note above
+```
+
+**5. Deploy:**
 
 ```bash
 npx wrangler deploy
 ```
 
 The Worker has no public URL (`workers_dev = false`) — it only ever runs from cron, so
-nobody can trigger it from outside.
+nobody can trigger it from the outside.
+
+### Cron schedule
+
+```toml
+crons = ["*/5 * * * *",   # availability check
+         "0 6 * * *"]     # daily heartbeat (06:00 UTC)
+```
+
+The heartbeat expression must match `HEARTBEAT_CRON` in `src/index.js` — that's how the
+Worker tells the two triggers apart.
 
 ## Testing
 
 `wrangler dev --remote` runs the Worker on Cloudflare's edge with your real bindings and
-exposes it locally:
+secrets, exposed on localhost:
 
 ```bash
 npx wrangler dev --remote
-curl "http://127.0.0.1:8787/"          # run a real check, return JSON diagnostics
-curl "http://127.0.0.1:8787/?test=1"   # send a test notification, show ntfy's exact reply
 ```
+
+| Request | What it does |
+|---|---|
+| `/` | Run a real check, return JSON diagnostics (no notification) |
+| `/?notify=1` | Same, but allowed to notify |
+| `/?test=1` | Send a test alert over every configured channel |
+| `/?test=tg` | Send a test alert over Telegram only |
+| `/?heartbeat=1` | Send the heartbeat now, return the exact API response |
+| `/?chatid=1` | List chat ids that have messaged your bot |
 
 Check liveness at any time — `last_run` is written on every successful pass:
 
@@ -105,20 +149,33 @@ Check liveness at any time — `last_run` is written on every successful pass:
 npx wrangler kv key get last_run --namespace-id <id> --remote
 ```
 
+## Tuning notifications on the phone
+
+The Bot API only distinguishes *normal* from *silent* (`disable_notification`); it cannot set
+a vibration pattern or priority. Those are receiver-side, per chat:
+
+**Telegram → open the bot chat → tap its name → Notifications** — set **Vibrate** to `Long`,
+**Priority** to `Urgent`, and pick a distinctive **Sound** so you recognise the alert without
+looking. **Settings → Notifications and Sounds → Repeat Notifications** will keep reminding
+you until you open it.
+
+The daily heartbeat is sent with `disable_notification`, which overrides these — it stays
+quiet no matter how loud you make the chat.
+
 ## Limitations
 
 - Uses an undocumented public endpoint. If ZnanyLekarz changes its page structure, token
   extraction breaks — you get a failure alert rather than silence.
 - Notifications trigger on an *increase* in free slots, not on every individual change.
-- If the Worker stops running entirely, nothing reports it — the alarm travels over the
-  same channel as everything else.
+- The heartbeat is the only guard against total failure; if you ignore its absence, a dead
+  monitor still looks like a quiet one.
 
 ## Disclaimer
 
 Unofficial and unaffiliated with ZnanyLekarz / Docplanner. It reads the same public
-availability data the website serves to anonymous visitors, at a modest polling rate, and
-it does not book anything on your behalf. Intended for personal use — please be considerate
-with the request rate.
+availability data the website serves to anonymous visitors, at a modest polling rate, and it
+does not book anything on your behalf. Intended for personal use — please be considerate with
+the request rate.
 
 ## License
 
