@@ -8,8 +8,11 @@ workers_dev = false
 
 # Sprawdzaj co 5 minut. Cloudflare wykonuje to niezawodnie — bez throttlingu,
 # bez limitu czasu joba, bez łańcucha uruchomień.
+# "*/5 * * * *" — sprawdzanie terminów
+# "0 6 * * *"   — dzienny puls (06:00 UTC = 08:00 czasu polskiego); musi się zgadzać
+#                 ze stałą HEARTBEAT_CRON w src/index.js
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "0 6 * * *"]
 
 # Konfiguracja lekarza i okna dat (nie sekrety — mogą być w repo).
 [vars]

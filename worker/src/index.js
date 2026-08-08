@@ -129,6 +129,46 @@ async function notify(env, slots) {
   return `HTTP ${r.status}${detail}`;
 }
 
+/** Cron pulsu — musi być identyczny jak wpis w wrangler.toml. */
+const HEARTBEAT_CRON = "0 6 * * *";
+
+/**
+ * Puls: raz dziennie potwierdza, że monitor żyje. Sens jest taki, że BRAK pulsu
+ * jest sygnałem — gdyby padł Worker albo ntfy, cisza wygląda identycznie jak
+ * "brak terminów", a alarm awaryjny leci tym samym kanałem, więc też by nie doszedł.
+ *
+ * Priority "default" = pojedyncza krótka wibracja, celowo inna niż "urgent"
+ * (długa seria) używany przy prawdziwych terminach.
+ */
+async function heartbeat(env) {
+  if (!env.NTFY_TOPIC) return;
+
+  const lastRun = await env.STATE.get("last_run");
+  const lastCount = await env.STATE.get("last_count");
+  const ageMin = lastRun
+    ? Math.round((Date.now() - Date.parse(lastRun)) / 60000)
+    : null;
+
+  // Puls raportuje też ŚWIEŻOŚĆ ostatniego sprawdzenia — inaczej mógłby zapewniać
+  // "żyję", podczas gdy same sprawdzenia od godzin się wywracają.
+  const stale = ageMin === null || ageMin > 15;
+
+  const body = stale
+    ? `Sprawdzenia nie dzialaja. Ostatnie: ${ageMin === null ? "nigdy" : ageMin + " min temu"}`
+    : `Wolnych terminow w oknie: ${lastCount ?? "?"}\nOstatnie sprawdzenie: ${ageMin} min temu`;
+
+  await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
+    method: "POST",
+    body,
+    headers: {
+      ...ntfyAuth(env),
+      Title: headerSafe(stale ? "Monitor - COS NIE GRA" : "Monitor dziala"),
+      Priority: stale ? "high" : "default",
+      Tags: stale ? "warning" : "heavy_check_mark",
+    },
+  });
+}
+
 /** Alert, gdy monitor sam się wykłada (np. ZnanyLekarz zmienił stronę). */
 async function notifyFailure(env, message) {
   if (!env.NTFY_TOPIC) return;
@@ -175,6 +215,10 @@ async function runCheck(env, { allowNotify = true } = {}) {
 
 export default {
   async scheduled(event, env, ctx) {
+    if (event.cron === HEARTBEAT_CRON) {
+      ctx.waitUntil(heartbeat(env).catch((e) => console.error("heartbeat:", e.message)));
+      return;
+    }
     ctx.waitUntil(
       runCheck(env).catch(async (e) => {
         console.error("check failed:", e.message);
@@ -198,6 +242,12 @@ export default {
         topicUstawiony: Boolean(env.NTFY_TOPIC),
         topicDlugosc: env.NTFY_TOPIC ? env.NTFY_TOPIC.length : 0,
       });
+    }
+
+    // ?heartbeat=1 → wyślij puls od razu, bez czekania na poranny cron.
+    if (params.get("heartbeat") === "1") {
+      await heartbeat(env);
+      return Response.json({ heartbeat: "wyslany" });
     }
 
     const notifyFlag = params.get("notify") === "1";
