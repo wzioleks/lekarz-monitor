@@ -50,8 +50,7 @@ If the heartbeat fires but the last successful check is stale, it switches to a 
 > needs a PAT that expires, private repos meter minutes (a 24/7 loop burns any plan's quota
 > in ~2 days), and when a job failed to get a runner the in-job failure alert could never
 > fire — so it died silently for hours. A cron-triggered Worker removes those failure modes
-> rather than working around them. The old workflow is kept in
-> [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml) for reference, disabled.
+> rather than working around them.
 
 ## Setup
 
