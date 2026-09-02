@@ -21,8 +21,8 @@ ADDRESS_ID   = "1042708"
 SERVICE_ID   = "2868908"
 PROFILE_URL  = "https://www.znanylekarz.pl/mariana-karwan/dermatolog/koscierzyna"
 DOCTOR_NAME  = "Mariana Karwan — dermatolog"
-SEARCH_FROM  = "2026-08-21"
-SEARCH_UNTIL = "2026-08-31"
+SEARCH_FROM  = "2026-09-07"
+SEARCH_UNTIL = "2026-09-07"
 
 # Stan między uruchomieniami (poprzednia liczba terminów).
 # ID uzupełnia się po: npx wrangler kv namespace create STATE
