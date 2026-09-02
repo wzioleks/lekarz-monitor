@@ -39,11 +39,11 @@ NTFY_TOPIC         = os.environ.get("NTFY_TOPIC", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# Okno poszukiwań: 21.08 – 31.08.2026 (włącznie).
+# Okno poszukiwań: 07.09.2026.
 # SEARCH_FROM = None → tryb testowy: szukaj od dziś (przydatne, gdy w docelowym
 # oknie jest pusto i chcesz sprawdzić, czy powiadomienia w ogóle dochodzą).
-SEARCH_FROM  = date(2026, 8, 21)
-SEARCH_UNTIL = date(2026, 8, 31)
+SEARCH_FROM  = date(2026, 9, 7)
+SEARCH_UNTIL = date(2026, 9, 7)
 
 # Plik stanu — pamięta poprzedni wynik między uruchomieniami (Actions Cache)
 STATE_FILE = "last_count.txt"
